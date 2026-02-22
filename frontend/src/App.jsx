@@ -1,14 +1,14 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { supabase } from './utils/supabase';
-import FileUpload from './components/FileUpload';
-import Dashboard from './components/Dashboard';
-import Hero from './components/landing/Hero';
-import Features from './components/landing/Features';
-import Pricing from './components/landing/pricing';
-import UploadTracker from './components/freemium/UploadTracker';
-import UpgradeModal from './components/freemium/UpgradeModal';
-import { useToast } from './components/ToastContext';
+import FileUpload from './components/FileUpload.jsx';
+import Dashboard from './components/Dashboard.jsx';
+import Hero from './components/landing/Hero.jsx';
+import Features from './components/landing/Features.jsx';
+import Pricing from './components/landing/pricing.jsx';
+import UploadTracker from "./components/freemium/UploadTracker.jsx";
+import UpgradeModal from './components/freemium/UpgradeModal.jsx';
+import { useToast } from './components/ToastContext.jsx';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 
