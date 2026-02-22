@@ -44,7 +44,7 @@ async function verifyUser(req, res, next) {
 // 3. CORS Configuration
 app.use(cors({
     origin: [
-        "ai-data-visualizer-drab.vercel.app", 
+        "https://ai-data-visualizer-drab.vercel.app", 
         "http://localhost:5173",
         "http://127.0.0.1:5173"
     ],
@@ -177,7 +177,7 @@ app.post("/api/track-upload", verifyUser, (req, res) => {
 app.post("/api/create-checkout-session", verifyUser, async (req, res) => {
     try {
         // Safely determine where to send the user back to
-        const frontendUrl = req.headers.origin || 'ai-data-visualizer-drab.vercel.app'; 
+        const frontendUrl = req.headers.origin || 'https://ai-data-visualizer-drab.vercel.app'; 
 
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
