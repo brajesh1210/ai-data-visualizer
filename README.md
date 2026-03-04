@@ -1,4 +1,4 @@
-AuraBI - AI Data Visualizer
+# AuraBI - AI Data Visualizer
 
 AuraBI is a sophisticated web application that transforms raw CSV data and Google Sheets into actionable visual insights. It leverages a modern tech stack to provide seamless data parsing, AI-driven analysis recommendations, and a premium "freemium" experience with Stripe integration.
 
