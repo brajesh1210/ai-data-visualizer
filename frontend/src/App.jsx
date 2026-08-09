@@ -1,6 +1,17 @@
+// Updated Imports: Added signOut from firebase/auth and removed all implicit dependencies on a global supabase object.  
+
+// Replaced Token Retrieval (supabase.auth.getSession()): In every API call (fetchStatus, finalizeUpgrade, handleDataReceived, and handleUpgrade), the Supabase session check was removed. It is replaced with Firebase's const token = await user.getIdToken();, which automatically handles token refreshing and extraction from the current user object.  
+
+// Added Safety Checks: In handleDataReceived and handleUpgrade, logical checks if (user) and if (!user) throw new Error(...) were added to prevent attempting to get an ID token from a null user, avoiding runtime crashes.
+
+// Rewired the Sign-Out Button: Created a new handleSignOut function that utilizes Firebase's signOut(auth) method and attached it to the button in the navigation bar, fully removing the supabase.auth.signOut() inline call.
+
+//CHANGES DONE FOR SETUPPING FIREBASE AND REMOVING SUPABASE
+
+
+
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { supabase } from './utils/supabase';
 import FileUpload from './components/FileUpload.jsx';
 import Dashboard from './components/Dashboard.jsx';
 import Hero from './components/Landing/Hero.jsx';
@@ -9,6 +20,8 @@ import Pricing from './components/Landing/pricing.jsx';
 import UploadTracker from "./components/freemium/UploadTracker.jsx";
 import UpgradeModal from './components/freemium/UpgradeModal.jsx';
 import { useToast } from './components/ToastContext.jsx';
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { auth } from "./utils/firebase";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 
@@ -30,11 +43,14 @@ function App() {
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, []);
 
-  // Supabase Auth Listener
+  // Firebase Auth Listener
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => setUser(session?.user ?? null));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => setUser(session?.user ?? null));
-    return () => subscription.unsubscribe();
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser); // currentUser is null if signed out
+    });
+    
+    // Cleanup subscription on unmount
+    return () => unsubscribe();
   }, []);
 
   // Fetch Usage Status
@@ -42,13 +58,15 @@ function App() {
     async function fetchStatus() {
       if (!user) return;
       try {
-        const { data: { session } } = await supabase.auth.getSession();
+        const token = await user.getIdToken();
         const { data: res } = await axios.get(`${API_BASE}/upload-status`, {
-          headers: { Authorization: `Bearer ${session?.access_token}` }
+          headers: { Authorization: `Bearer ${token}` }
         });
         setUploadCount(res.uploadCount ?? 0);
         setIsPremium(res.isPremium ?? false);
-      } catch { }
+      } catch (error) {
+        console.error("Failed to fetch status:", error);
+      }
     }
     fetchStatus();
   }, [user]);
@@ -59,9 +77,9 @@ function App() {
     if (query.get("upgrade") === "success" && user) {
       async function finalizeUpgrade() {
         try {
-          const { data: { session } } = await supabase.auth.getSession();
+          const token = await user.getIdToken();
           await axios.post(`${API_BASE}/upgrade-premium`, {}, {
-            headers: { Authorization: `Bearer ${session?.access_token}` }
+            headers: { Authorization: `Bearer ${token}` }
           });
           setIsPremium(true);
           showToast('Payment successful! Welcome to Pro.', 'success');
@@ -86,11 +104,15 @@ function App() {
     }
     setUploadCount(prev => prev + 1);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      await axios.post(`${API_BASE}/track-upload`, {}, {
-        headers: { Authorization: `Bearer ${session?.access_token}` }
-      });
-    } catch {}
+      if (user) {
+        const token = await user.getIdToken();
+        await axios.post(`${API_BASE}/track-upload`, {}, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      }
+    } catch (error) {
+      console.error("Failed to track upload:", error);
+    }
 
     setData(newData);
     setAnalysis(newAnalysis);
@@ -101,9 +123,10 @@ function App() {
   async function handleUpgrade() {
     setIsUpgrading(true);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
+      if (!user) throw new Error("User not authenticated");
+      const token = await user.getIdToken();
       const response = await axios.post(`${API_BASE}/create-checkout-session`, {}, {
-        headers: { Authorization: `Bearer ${session?.access_token}` }
+        headers: { Authorization: `Bearer ${token}` }
       });
       window.location.href = response.data.url;
     } catch (err) {
@@ -119,6 +142,15 @@ function App() {
       document.getElementById('upload')?.scrollIntoView({ behavior: 'smooth' });
     } else {
       setShowUpgradeModal(true);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      showToast('Signed out successfully', 'success');
+    } catch (error) {
+      showToast('Error signing out', 'error');
     }
   };
 
@@ -145,7 +177,7 @@ function App() {
               <li><a href="#pricing" className="text-[#8a9ab5] hover:text-[#c9a84c] text-[0.8rem] no-underline transition-colors">PRICING</a></li>
             </div>
             {user && (
-              <button onClick={() => supabase.auth.signOut()} className="text-[#8a9ab5] hover:text-[#c9a84c] bg-transparent border-none text-[0.8rem] cursor-pointer">SIGN OUT</button>
+              <button onClick={handleSignOut} className="text-[#8a9ab5] hover:text-[#c9a84c] bg-transparent border-none text-[0.8rem] cursor-pointer">SIGN OUT</button>
             )}
             <UploadTracker uploadCount={uploadCount} isPremium={isPremium} />
           </div>

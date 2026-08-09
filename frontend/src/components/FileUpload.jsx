@@ -1,8 +1,9 @@
 import { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
 import axios from 'axios';
-import { supabase } from '../utils/supabase';
-import LoaderOverlay from './LoaderOverlay'; // <-- Implemented!
+import { signInWithPopup } from "firebase/auth";
+import { auth, googleProvider } from "../utils/firebase";
+import LoaderOverlay from './LoaderOverlay'; 
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001/api';
 
@@ -15,19 +16,32 @@ export default function FileUpload({ onDataReceived, user }) {
 
     async function signInWithGoogle() {
         setError('');
-        await supabase.auth.signInWithOAuth({ 
-            provider: 'google', 
-            options: { redirectTo: window.location.origin }
-        });
+        try {
+            await signInWithPopup(auth, googleProvider);
+        } catch (err) {
+            setError(err.message || 'Failed to sign in with Google.');
+        }
     }
 
     const onDrop = useCallback((acceptedFiles) => {
         setError('');
-        if (acceptedFiles.length > 0) setFile(acceptedFiles[0]);
+        if (acceptedFiles.length > 0) {
+            const droppedFile = acceptedFiles[0];
+            
+            // Bypass browser MIME bugs by manually checking the file extension
+            if (droppedFile.name.toLowerCase().endsWith('.csv')) {
+                setFile(droppedFile);
+            } else {
+                setError('Invalid file type. Please upload a valid .csv file.');
+            }
+        }
     }, []);
 
+    // We removed the 'accept' parameter entirely. 
+    // This stops the OS from showing the red "blocked" cursor on hover.
     const { getRootProps, getInputProps, isDragActive } = useDropzone({ 
-        onDrop, accept: { 'text/csv': ['.csv'] }, maxFiles: 1 
+        onDrop, 
+        maxFiles: 1 
     });
 
     async function executeWithLoader(apiCall) {
@@ -54,20 +68,31 @@ export default function FileUpload({ onDataReceived, user }) {
     }
 
     async function handleCSVUpload() {
-        if (!file) return;
-        const { data: { session } } = await supabase.auth.getSession();
-        const formData = new FormData(); formData.append('file', file);
-        executeWithLoader(() => axios.post(`${API_BASE}/upload-csv`, formData, { 
-            headers: { Authorization: `Bearer ${session?.access_token}` } 
-        }));
+        if (!file || !user) return;
+        
+        try {
+            const token = await user.getIdToken();
+            const formData = new FormData(); 
+            formData.append('file', file);
+            executeWithLoader(() => axios.post(`${API_BASE}/upload-csv`, formData, { 
+                headers: { Authorization: `Bearer ${token}` } 
+            }));
+        } catch (err) {
+            setError("Authentication failed before upload.");
+        }
     }
 
     async function handleSheetsImport() {
-        if (!sheetsUrl.trim()) return;
-        const { data: { session } } = await supabase.auth.getSession();
-        executeWithLoader(() => axios.post(`${API_BASE}/google-sheets`, { url: sheetsUrl }, { 
-            headers: { Authorization: `Bearer ${session?.access_token}` } 
-        }));
+        if (!sheetsUrl.trim() || !user) return;
+        
+        try {
+            const token = await user.getIdToken();
+            executeWithLoader(() => axios.post(`${API_BASE}/google-sheets`, { url: sheetsUrl }, { 
+                headers: { Authorization: `Bearer ${token}` } 
+            }));
+        } catch (err) {
+            setError("Authentication failed before connecting.");
+        }
     }
 
     return (

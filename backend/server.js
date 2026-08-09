@@ -5,7 +5,15 @@ const cors = require("cors");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
-const { createClient } = require('@supabase/supabase-js');
+
+// 1. Initialize Firebase Admin SDK (v12+ syntax)
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
+const serviceAccount = require('./firebase-service-account.json');
+
+initializeApp({
+    credential: cert(serviceAccount)
+});
 
 // INITIALIZE STRIPE SECURELY USING ENV VARIABLE
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
@@ -13,31 +21,28 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const app = express();
 app.use(express.json());
 
-// 1. Initialize Supabase Admin Client
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY; 
-const supabase = createClient(supabaseUrl, supabaseKey);
-
-// 2. Auth Middleware: Verifies the JWT (access_token) sent from the frontend
+// 2. Auth Middleware: Verifies the Firebase ID token sent from the frontend
 async function verifyUser(req, res, next) {
     try {
         const authHeader = req.headers.authorization;
-        if (!authHeader) return res.status(401).json({ error: "No token provided" });
-
-        const token = authHeader.split(" ")[1];
-        // getUser is the secure way to verify a JWT server-side
-        const { data: { user }, error } = await supabase.auth.getUser(token);
-
-        if (error || !user) {
-            console.log("SUPABASE ERROR:", error); // <--- ADD THIS LINE
-            return res.status(401).json({ error: "Invalid or expired session" });
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: "No token provided or invalid format" });
         }
 
+        const token = authHeader.split(" ")[1];
+        
+        // Verify token securely via Firebase Admin
+        const decodedToken = await getAuth().verifyIdToken(token);
+
         // Attach verified user info to the request for use in route handlers
-        req.user = user;
+        req.user = {
+            ...decodedToken,
+            id: decodedToken.uid 
+        };
         next();
     } catch (err) {
-        return res.status(500).json({ error: "Authentication server error" });
+        console.error("FIREBASE AUTH ERROR:", err.message);
+        return res.status(401).json({ error: "Invalid or expired session" });
     }
 }
 
@@ -96,7 +101,6 @@ function getMockAnalysis(data) {
 }
 
 // 7. Persistent User Store (Local memory)
-// Check for permanent premium based on email
 const userStore = new Map();
 const PERMANENT_PREMIUM_EMAIL = "brajeshupadhyay1210@gmail.com";
 
@@ -108,7 +112,6 @@ function getUserData(userId, email) {
     }
     
     const user = userStore.get(userId);
-    // Force true on every fetch just in case it was missed
     if (isPermanentPremium) user.isPremium = true; 
     
     return user;
@@ -124,15 +127,14 @@ app.post("/api/upload-csv", verifyUser, upload.single("file"), async (req, res) 
         const csvText = fs.readFileSync(req.file.path, "utf-8");
         const data = parseCSV(csvText);
 
-        // Simulate AI processing time
         await new Promise(r => setTimeout(r, 1500));
         const analysis = getMockAnalysis(data);
 
-        // Clean up uploaded file
         if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
 
         res.json({ data, analysis, user: req.user.email });
     } catch (error) {
+        console.error("💥 CSV UPLOAD CRASH:", error);
         res.status(500).json({ error: "Upload failed" });
     }
 });
@@ -152,6 +154,7 @@ app.post("/api/google-sheets", verifyUser, async (req, res) => {
 
         res.json({ data, analysis });
     } catch (error) {
+        console.error("💥 GOOGLE SHEETS CRASH:", error);
         res.status(500).json({ error: "Failed to import sheet" });
     }
 });
@@ -173,10 +176,9 @@ app.post("/api/track-upload", verifyUser, (req, res) => {
     res.json(user);
 });
 
-// E. STRIPE CHECKOUT SESSION (Simulation)
+// E. STRIPE CHECKOUT SESSION
 app.post("/api/create-checkout-session", verifyUser, async (req, res) => {
     try {
-        // Safely determine where to send the user back to
         const frontendUrl = req.headers.origin || 'https://ai-data-visualizer-drab.vercel.app'; 
 
         const session = await stripe.checkout.sessions.create({
@@ -189,9 +191,9 @@ app.post("/api/create-checkout-session", verifyUser, async (req, res) => {
                             name: 'AuraBI Pro Plan',
                             description: 'Unlimited charts, Full PDF Reports, and Priority Analysis.',
                         },
-                        unit_amount: 9900, // ₹99.00
+                        unit_amount: 9900, 
                         recurring: {
-                            interval: 'month', // THIS MAKES IT A 1-MONTH PLAN
+                            interval: 'month',
                         },
                     },
                     quantity: 1,
@@ -211,7 +213,7 @@ app.post("/api/create-checkout-session", verifyUser, async (req, res) => {
     }
 });
 
-// F. UPGRADE TO PREMIUM (Triggered after successful Stripe return)
+// F. UPGRADE TO PREMIUM
 app.post("/api/upgrade-premium", verifyUser, (req, res) => {
     const user = getUserData(req.user.id, req.user.email);
     user.isPremium = true;
@@ -220,7 +222,7 @@ app.post("/api/upgrade-premium", verifyUser, (req, res) => {
 
 // 8. Public Health Check
 app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", mode: "LIVE MODE - Supabase Auth Enabled" });
+    res.json({ status: "ok", mode: "LIVE MODE - Firebase Auth Enabled" });
 });
 
 // Start Server

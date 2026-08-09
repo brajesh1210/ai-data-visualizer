@@ -1,4 +1,6 @@
 // frontend/src/components/landing/Hero.jsx
+import { signInWithPopup } from "firebase/auth";
+import { auth, googleProvider } from "../../utils/firebase";
 export default function Hero({ onGetStarted }) {
   return (
     <>

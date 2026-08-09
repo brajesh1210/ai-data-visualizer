@@ -10,8 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.97.0",
     "axios": "^1.13.5",
+    "firebase": "^12.17.1",
     "html2canvas": "^1.4.1",
     "lucide-react": "^0.575.0",
     "papaparse": "^5.5.3",
