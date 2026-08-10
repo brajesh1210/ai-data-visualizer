@@ -1,10 +1,12 @@
-// backend/server.js
+// backend/server.js  —  MEMORY-SAFE VERSION (handles large CSV files)
 require('dotenv').config();
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
 const fs = require("fs");
 const path = require("path");
+const readline = require("readline");
+const { Readable } = require("stream");
 
 // 1. Initialize Firebase Admin SDK (v12+ syntax)
 const { initializeApp, cert } = require('firebase-admin/app');
@@ -30,14 +32,14 @@ async function verifyUser(req, res, next) {
         }
 
         const token = authHeader.split(" ")[1];
-        
+
         // Verify token securely via Firebase Admin
         const decodedToken = await getAuth().verifyIdToken(token);
 
         // Attach verified user info to the request for use in route handlers
         req.user = {
             ...decodedToken,
-            id: decodedToken.uid 
+            id: decodedToken.uid
         };
         next();
     } catch (err) {
@@ -49,7 +51,7 @@ async function verifyUser(req, res, next) {
 // 3. CORS Configuration
 app.use(cors({
     origin: [
-        "https://ai-data-visualizer-drab.vercel.app", 
+        "https://ai-data-visualizer-drab.vercel.app",
         "http://localhost:5173",
         "http://127.0.0.1:5173"
     ],
@@ -64,39 +66,88 @@ const storage = multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, uploadsDir),
     filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
 });
-const upload = multer({ storage });
 
-// 5. Utility: Simple CSV parser
-function parseCSV(csvText) {
-    const lines = csvText.trim().split("\n");
-    if (lines.length === 0) return [];
-    const headers = lines[0].split(",").map(h => h.trim().replace(/"/g, ""));
-    return lines.slice(1).map(line => {
-        const values = line.split(",").map(v => v.trim().replace(/"/g, ""));
-        const obj = {};
-        headers.forEach((header, i) => {
-            obj[header] = values[i] || "";
-        });
-        return obj;
-    });
+// IMPORTANT: cap upload size so a huge file can't OOM the server (50MB)
+const upload = multer({
+    storage,
+    limits: { fileSize: 50 * 1024 * 1024 } // 50 MB
+});
+
+// 5. Lightweight CSV line parser (handles quoted fields, NO external deps)
+function parseCsvLine(line) {
+    const result = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (inQuotes) {
+            if (ch === '"') {
+                if (line[i + 1] === '"') { cur += '"'; i++; }
+                else inQuotes = false;
+            } else {
+                cur += ch;
+            }
+        } else {
+            if (ch === '"') inQuotes = true;
+            else if (ch === ',') { result.push(cur); cur = ''; }
+            else cur += ch;
+        }
+    }
+    result.push(cur);
+    return result;
 }
 
-// 6. Utility: Mock AI analysis
-function getMockAnalysis(data) {
-    const columns = Object.keys(data[0] || {});
-    const numRows = data.length;
+// Stream a readable source line-by-line and return only what we need.
+// This NEVER holds the whole file in memory -> no more OOM on big files.
+async function streamCsv(source) {
+    const rl = readline.createInterface({ input: source, crlfDelay: Infinity });
+    const MAX_RETURN_ROWS = 5000; // cap rows sent back to the browser
+    let headers = null;
+    let rowCount = 0;
+    const sample = [];
+    const numericCols = new Set();
+
+    for await (const rawLine of rl) {
+        let line = rawLine;
+        if (line.charCodeAt(0) === 0xFEFF) line = line.slice(1); // strip BOM
+        if (!line.trim()) continue;
+
+        const fields = parseCsvLine(line);
+        if (!headers) { headers = fields; continue; }
+
+        const row = {};
+        headers.forEach((h, i) => { row[h] = (fields[i] ?? '').trim(); });
+
+        // lightweight numeric-column detection (for chart suggestions)
+        for (const [k, v] of Object.entries(row)) {
+            const n = Number(v);
+            if (v !== '' && !isNaN(n) && isFinite(n)) numericCols.add(k);
+        }
+
+        rowCount++;
+        if (rowCount <= MAX_RETURN_ROWS) sample.push(row);
+    }
+
+    return { columns: headers || [], rowCount, sample, numericCols: [...numericCols] };
+}
+
+// 6. Mock AI analysis — uses columns + counts, not the full dataset
+function getMockAnalysis(columns, rowCount, numericCols) {
+    const cols = columns.length ? columns : [];
     return {
         insights: [
-            `Analyzed ${numRows} rows of data with ${columns.length} attributes.`,
-            `Detected key fields: ${columns.slice(0, 3).join(', ')}.`,
+            `Analyzed ${rowCount} rows of data with ${cols.length} attributes.`,
+            `Detected key fields: ${cols.slice(0, 3).join(', ')}.`,
+            `Numeric columns for charts: ${numericCols.slice(0, 5).join(', ') || 'none'}.`,
             "Data distribution looks healthy for visualization."
         ],
-        summary: `Dataset contains ${numRows} entries.`,
+        summary: `Dataset contains ${rowCount} entries (preview shows up to 5000 rows).`,
         chartRecommendations: {
             bar: "Ideal for categorical comparison.",
             pie: "Best for proportional analysis.",
             line: "Great for trend tracking."
-        }
+        },
+        totalRows: rowCount
     };
 }
 
@@ -106,53 +157,52 @@ const PERMANENT_PREMIUM_EMAIL = "brajeshupadhyay1210@gmail.com";
 
 function getUserData(userId, email) {
     const isPermanentPremium = email === PERMANENT_PREMIUM_EMAIL;
-    
+
     if (!userStore.has(userId)) {
         userStore.set(userId, { uploadCount: 0, isPremium: isPermanentPremium });
     }
-    
+
     const user = userStore.get(userId);
-    if (isPermanentPremium) user.isPremium = true; 
-    
+    if (isPermanentPremium) user.isPremium = true;
+
     return user;
 }
 
 // --- PROTECTED ROUTES (Using verifyUser middleware) ---
 
-// A. CSV UPLOAD
+// A. CSV UPLOAD  (STREAMED -> safe for big files)
 app.post("/api/upload-csv", verifyUser, upload.single("file"), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-        const csvText = fs.readFileSync(req.file.path, "utf-8");
-        const data = parseCSV(csvText);
+        const filePath = req.file.path;
+        const { columns, rowCount, sample, numericCols } = await streamCsv(fs.createReadStream(filePath));
+        const analysis = getMockAnalysis(columns, rowCount, numericCols);
 
-        await new Promise(r => setTimeout(r, 1500));
-        const analysis = getMockAnalysis(data);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath); // cleanup temp file
 
-        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-
-        res.json({ data, analysis, user: req.user.email });
+        res.json({ data: sample, analysis, user: req.user.email, totalRows: rowCount });
     } catch (error) {
         console.error("💥 CSV UPLOAD CRASH:", error);
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
         res.status(500).json({ error: "Upload failed" });
     }
 });
 
-// B. GOOGLE SHEETS IMPORT
+// B. GOOGLE SHEETS IMPORT  (STREAMED)
 app.post("/api/google-sheets", verifyUser, async (req, res) => {
     try {
         const { url } = req.body;
         if (!url) return res.status(400).json({ error: "No URL provided" });
 
         const response = await fetch(url);
+        if (!response.ok) return res.status(400).json({ error: "Could not fetch the sheet URL" });
+
         const csvText = await response.text();
-        const data = parseCSV(csvText);
+        const { columns, rowCount, sample, numericCols } = await streamCsv(Readable.from(csvText));
+        const analysis = getMockAnalysis(columns, rowCount, numericCols);
 
-        await new Promise(r => setTimeout(r, 1500));
-        const analysis = getMockAnalysis(data);
-
-        res.json({ data, analysis });
+        res.json({ data: sample, analysis, totalRows: rowCount });
     } catch (error) {
         console.error("💥 GOOGLE SHEETS CRASH:", error);
         res.status(500).json({ error: "Failed to import sheet" });
@@ -179,7 +229,7 @@ app.post("/api/track-upload", verifyUser, (req, res) => {
 // E. STRIPE CHECKOUT SESSION
 app.post("/api/create-checkout-session", verifyUser, async (req, res) => {
     try {
-        const frontendUrl = req.headers.origin || 'https://ai-data-visualizer-drab.vercel.app'; 
+        const frontendUrl = req.headers.origin || 'https://ai-data-visualizer-drab.vercel.app';
 
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
@@ -191,7 +241,7 @@ app.post("/api/create-checkout-session", verifyUser, async (req, res) => {
                             name: 'AuraBI Pro Plan',
                             description: 'Unlimited charts, Full PDF Reports, and Priority Analysis.',
                         },
-                        unit_amount: 9900, 
+                        unit_amount: 9900,
                         recurring: {
                             interval: 'month',
                         },
@@ -223,6 +273,16 @@ app.post("/api/upgrade-premium", verifyUser, (req, res) => {
 // 8. Public Health Check
 app.get("/api/health", (req, res) => {
     res.json({ status: "ok", mode: "LIVE MODE - Firebase Auth Enabled" });
+});
+
+// 9. Global error handler — returns clean, CORS-friendly errors
+//    (also catches multer's file-size limit)
+app.use((err, req, res, next) => {
+    console.error("UNHANDLED ERROR:", err);
+    if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: "File too large. Max 50MB allowed." });
+    }
+    res.status(500).json({ error: "Internal server error" });
 });
 
 // Start Server
